@@ -38,7 +38,7 @@ object Common {
     import Sc._
     import Sw._
 
-    for {
+    Sw.log.function("prepareDefinitions")(for {
       proto @ ProtocolDefinitions(protocolElems, protocolImports, packageObjectImports, packageObjectContents) <- ProtocolGenerator
         .fromSwagger[L, F](swagger, dtoPackage)
 
@@ -102,7 +102,7 @@ object Common {
         case CodegenTarget.Models =>
           Free.pure[F, CodegenDefinitions[L]](CodegenDefinitions[L](List.empty, List.empty, List.empty, Option.empty))
       }
-    } yield (proto, codegen)
+    } yield (proto, codegen))
   }
 
   def writePackage[L <: LA, F[_]](proto: ProtocolDefinitions[L], codegen: CodegenDefinitions[L], context: Context)(
@@ -123,8 +123,8 @@ object Common {
     val CodegenDefinitions(clients, servers, supportDefinitions, frameworkImplicits)                     = codegen
     val frameworkImplicitName                                                                            = frameworkImplicits.map(_._1)
 
-    val dtoComponents: List[String]                 = definitions ++ dtoPackage
-    val filteredDtoComponents: Option[List[String]] = if (protocolElems.nonEmpty) Some(dtoComponents) else None
+    val dtoComponents: List[String]                         = definitions ++ dtoPackage
+    val filteredDtoComponents: Option[NonEmptyList[String]] = if (protocolElems.nonEmpty) NonEmptyList.fromList(dtoComponents) else None
 
     for {
       protoOut <- protocolElems.traverse(writeProtocolDefinition(outputPath, pkgName, definitions, dtoComponents, customImports ++ protocolImports, _))
@@ -142,8 +142,10 @@ object Common {
       frameworkImports     <- getFrameworkImports(context.tracing)
       frameworkDefinitions <- getFrameworkDefinitions(context.tracing)
 
-      files <- (clients.flatTraverse(writeClient(pkgPath, pkgName, customImports, frameworkImplicitName, filteredDtoComponents, _)),
-                servers.flatTraverse(writeServer(pkgPath, pkgName, customImports, frameworkImplicitName, filteredDtoComponents, _))).mapN(_ ++ _)
+      files <- (
+        clients.flatTraverse(writeClient(pkgPath, pkgName, customImports, frameworkImplicitName, filteredDtoComponents.map(_.toList), _)),
+        servers.flatTraverse(writeServer(pkgPath, pkgName, customImports, frameworkImplicitName, filteredDtoComponents.map(_.toList), _))
+      ).mapN(_ ++ _)
 
       implicits <- renderImplicits(pkgPath, pkgName, frameworkImports, protocolImports, customImports)
       frameworkImplicitsFile <- frameworkImplicits.fold(Free.pure[F, Option[WriteTree]](None))({
@@ -156,16 +158,15 @@ object Common {
       supportDefinitionsFiles <- supportDefinitions.traverse({
         case SupportDefinition(name, imports, defn) => renderFrameworkDefinitions(pkgPath, pkgName, imports, defn, name)
       })
-    } yield
-      (
-        protocolDefinitions ++
+    } yield (
+      protocolDefinitions ++
           packageObject.toList ++
           files ++
           implicits.toList ++
           frameworkImplicitsFile.toList ++
           frameworkDefinitionsFiles ++
           supportDefinitionsFiles
-      ).toList
+    ).toList
   }
 
   def processArgs[L <: LA, F[_]](

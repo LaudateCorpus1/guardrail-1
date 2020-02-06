@@ -82,12 +82,12 @@ class Issue43 extends FunSpec with Matchers with SwaggerSpecRunner {
     val (
       ProtocolDefinitions(
         ClassDefinition(nameCat, tpeCat, fullTypeCat, clsCat, staticDefnsCat, catParents) :: ClassDefinition(nameDog, tpeDog, _, _, _, _) :: ADT(
-          namePet,
-          tpePet,
-          fullTpePet,
-          trtPet,
-          staticDefns
-        ) :: Nil,
+              namePet,
+              tpePet,
+              fullTpePet,
+              trtPet,
+              staticDefns
+            ) :: Nil,
         _,
         _,
         _
@@ -120,35 +120,37 @@ class Issue43 extends FunSpec with Matchers with SwaggerSpecRunner {
     }
 
     it("should generate right companion object") {
-      companionCat.toString.replaceAll("\n", "") shouldBe
-        """object Cat {
-          |  implicit val encodeCat: ObjectEncoder[Cat] = {
-          |    val readOnlyKeys = Set[String]()
-          |    Encoder.forProduct2("name", "huntingSkill") { (o: Cat) => (o.name, o.huntingSkill) }.mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
-          |  }
-          |  implicit val decodeCat: Decoder[Cat] = Decoder.forProduct2("name", "huntingSkill")(Cat.apply _)
-          |  sealed abstract class HuntingSkill(val value: String) { override def toString: String = value.toString }
-          |  object HuntingSkill {
-          |    object members {
-          |      case object Clueless extends HuntingSkill("clueless")
-          |      case object Lazy extends HuntingSkill("lazy")
-          |      case object Adventurous extends HuntingSkill("adventurous")
-          |      case object Aggressive extends HuntingSkill("aggressive")
-          |    }
-          |    val Clueless: HuntingSkill = members.Clueless
-          |    val Lazy: HuntingSkill = members.Lazy
-          |    val Adventurous: HuntingSkill = members.Adventurous
-          |    val Aggressive: HuntingSkill = members.Aggressive
-          |    val values = Vector(Clueless, Lazy, Adventurous, Aggressive)
-          |    implicit val encodeHuntingSkill: Encoder[HuntingSkill] = Encoder[String].contramap(_.value)
-          |    implicit val decodeHuntingSkill: Decoder[HuntingSkill] = Decoder[String].emap(value => parse(value).toRight(s"$value not a member of HuntingSkill"))
-          |    implicit val addPathHuntingSkill: AddPath[HuntingSkill] = AddPath.build(_.value)
-          |    implicit val showHuntingSkill: Show[HuntingSkill] = Show.build(_.value)
-          |    def parse(value: String): Option[HuntingSkill] = values.find(_.value == value)
-          |  }
-          |}
-          |
-          |""".stripMargin.replaceAll("\n", "")
+      val companion = q"""
+        object Cat {
+          implicit val encodeCat: Encoder.AsObject[Cat] = {
+            val readOnlyKeys = Set[String]()
+            Encoder.AsObject.instance[Cat](a => JsonObject.fromIterable(Vector(("name", a.name.asJson), ("huntingSkill", a.huntingSkill.asJson)))).mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
+          }
+          implicit val decodeCat: Decoder[Cat] = new Decoder[Cat] { final def apply(c: HCursor): Decoder.Result[Cat] = for (v0 <- c.downField("name").as[String]; v1 <- c.downField("huntingSkill").as[Cat.HuntingSkill]) yield Cat(v0, v1) }
+          sealed abstract class HuntingSkill(val value: String) { override def toString: String = value.toString }
+          object HuntingSkill {
+            object members {
+              case object Clueless extends HuntingSkill("clueless")
+              case object Lazy extends HuntingSkill("lazy")
+              case object Adventurous extends HuntingSkill("adventurous")
+              case object Aggressive extends HuntingSkill("aggressive")
+            }
+            val Clueless: HuntingSkill = members.Clueless
+            val Lazy: HuntingSkill = members.Lazy
+            val Adventurous: HuntingSkill = members.Adventurous
+            val Aggressive: HuntingSkill = members.Aggressive
+            val values = Vector(Clueless, Lazy, Adventurous, Aggressive)
+            implicit val encodeHuntingSkill: Encoder[HuntingSkill] = Encoder[String].contramap(_.value)
+            implicit val decodeHuntingSkill: Decoder[HuntingSkill] = Decoder[String].emap(value => parse(value).toRight(s"$$value not a member of HuntingSkill"))
+            implicit val addPathHuntingSkill: AddPath[HuntingSkill] = AddPath.build(_.value)
+            implicit val showHuntingSkill: Show[HuntingSkill] = Show.build(_.value)
+            def parse(value: String): Option[HuntingSkill] = values.find(_.value == value)
+            implicit val order: cats.Order[HuntingSkill] = cats.Order.by[HuntingSkill, Int](values.indexOf)
+          }
+        }
+      """
+
+      companionCat.structure shouldBe companion.structure
     }
 
     it("should generate parent as trait") {
@@ -304,32 +306,34 @@ class Issue43 extends FunSpec with Matchers with SwaggerSpecRunner {
     }
 
     it("should generate right case class") {
-      println(clsPersianCat.syntax)
       clsDog.structure shouldBe q"""case class Dog(name: String, packSize: Int = 0) extends Pet""".structure
       clsPersianCat.structure shouldBe q"""case class PersianCat(name: String, huntingSkill: Cat.HuntingSkill = Cat.HuntingSkill.Lazy, wool: Option[Int] = Option(10)) extends Cat""".structure
     }
 
-    it("should generate right companion object") {
-      companionDog.toString.replaceAll("\n", "") shouldBe
-        """object Dog {
-          |  implicit val encodeDog: ObjectEncoder[Dog] = {
-          |    val readOnlyKeys = Set[String]()
-          |    Encoder.forProduct2("name", "packSize") { (o: Dog) => (o.name, o.packSize) }.mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
-          |  }
-          |  implicit val decodeDog: Decoder[Dog] = Decoder.forProduct2("name", "packSize")(Dog.apply _)
-          |}
-          |
-          |""".stripMargin.replaceAll("\n", "")
-      companionPersianCat.toString.replaceAll("\n", "") shouldBe
-        """object PersianCat {
-          |  implicit val encodePersianCat: ObjectEncoder[PersianCat] = {
-          |    val readOnlyKeys = Set[String]()
-          |    Encoder.forProduct3("name", "huntingSkill", "wool") { (o: PersianCat) => (o.name, o.huntingSkill, o.wool) }.mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
-          |  }
-          |  implicit val decodePersianCat: Decoder[PersianCat] = Decoder.forProduct3("name", "huntingSkill", "wool")(PersianCat.apply _)
-          |}
-          |
-          |""".stripMargin.replaceAll("\n", "")
+    it("should generate right companion object (Dog)") {
+      val companion = q"""
+        object Dog {
+          implicit val encodeDog: Encoder.AsObject[Dog] = {
+            val readOnlyKeys = Set[String]()
+            Encoder.AsObject.instance[Dog](a => JsonObject.fromIterable(Vector(("name", a.name.asJson), ("packSize", a.packSize.asJson)))).mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
+          }
+          implicit val decodeDog: Decoder[Dog] = new Decoder[Dog] { final def apply(c: HCursor): Decoder.Result[Dog] = for (v0 <- c.downField("name").as[String]; v1 <- c.downField("packSize").as[Int]) yield Dog(v0, v1) }
+        }
+      """
+      companionDog.structure shouldBe companion.structure
+    }
+
+    it("should generate right companion object (PersianCat)") {
+      val companion = q"""
+        object PersianCat {
+          implicit val encodePersianCat: Encoder.AsObject[PersianCat] = {
+            val readOnlyKeys = Set[String]()
+            Encoder.AsObject.instance[PersianCat](a => JsonObject.fromIterable(Vector(("name", a.name.asJson), ("huntingSkill", a.huntingSkill.asJson), ("wool", a.wool.asJson)))).mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
+          }
+          implicit val decodePersianCat: Decoder[PersianCat] = new Decoder[PersianCat] { final def apply(c: HCursor): Decoder.Result[PersianCat] = for (v0 <- c.downField("name").as[String]; v1 <- c.downField("huntingSkill").as[Cat.HuntingSkill]; v2 <- c.downField("wool").as[Option[Int]]) yield PersianCat(v0, v1, v2) }
+        }
+      """
+      companionPersianCat.structure shouldBe companion.structure
     }
 
     it("should generate parent as trait") {
@@ -478,16 +482,16 @@ class Issue43 extends FunSpec with Matchers with SwaggerSpecRunner {
     }
 
     it("should generate right companion object") {
-      companionPersianCat.toString.replaceAll("\n", "") shouldBe
-        """object PersianCat {
-          |  implicit val encodePersianCat: ObjectEncoder[PersianCat] = {
-          |    val readOnlyKeys = Set[String]()
-          |    Encoder.forProduct1("catBreed") { (o: PersianCat) => o.catBreed }.mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
-          |  }
-          |  implicit val decodePersianCat: Decoder[PersianCat] = Decoder.forProduct1("catBreed")(PersianCat.apply _)
-          |}
-          |
-          |""".stripMargin.replaceAll("\n", "")
+      val companion = q"""
+        object PersianCat {
+          implicit val encodePersianCat: Encoder.AsObject[PersianCat] = {
+            val readOnlyKeys = Set[String]()
+            Encoder.AsObject.instance[PersianCat](a => JsonObject.fromIterable(Vector(("catBreed", a.catBreed.asJson)))).mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
+          }
+          implicit val decodePersianCat: Decoder[PersianCat] = new Decoder[PersianCat] { final def apply(c: HCursor): Decoder.Result[PersianCat] = for (v0 <- c.downField("catBreed").as[String]) yield PersianCat(v0) }
+        }
+      """
+      companionPersianCat.structure shouldBe companion.structure
     }
 
     it("should generate parent as trait") {
@@ -578,16 +582,16 @@ class Issue43 extends FunSpec with Matchers with SwaggerSpecRunner {
     }
 
     it("should generate right companion object") {
-      companionCat.toString.replaceAll("\n", "") shouldBe
-        """object Cat {
-          |  implicit val encodeCat: ObjectEncoder[Cat] = {
-          |    val readOnlyKeys = Set[String]()
-          |    Encoder.forProduct2("wool", "catBreed") { (o: Cat) => (o.wool, o.catBreed) }.mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
-          |  }
-          |  implicit val decodeCat: Decoder[Cat] = Decoder.forProduct2("wool", "catBreed")(Cat.apply _)
-          |}
-          |
-          |""".stripMargin.replaceAll("\n", "")
+      val companion = q"""
+        object Cat {
+          implicit val encodeCat: Encoder.AsObject[Cat] = {
+            val readOnlyKeys = Set[String]()
+            Encoder.AsObject.instance[Cat](a => JsonObject.fromIterable(Vector(("wool", a.wool.asJson), ("catBreed", a.catBreed.asJson)))).mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
+          }
+          implicit val decodeCat: Decoder[Cat] = new Decoder[Cat] { final def apply(c: HCursor): Decoder.Result[Cat] = for (v0 <- c.downField("wool").as[Boolean]; v1 <- c.downField("catBreed").as[String]) yield Cat(v0, v1) }
+        }
+      """
+      companionCat.structure shouldBe companion.structure
     }
 
     it("should generate parent as trait") {

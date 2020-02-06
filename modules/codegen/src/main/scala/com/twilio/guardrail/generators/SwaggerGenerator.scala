@@ -16,10 +16,10 @@ import scala.collection.JavaConverters._
 import scala.util.Try
 
 object SwaggerGenerator {
-  private def parameterSchemaType(parameter: Parameter): Target[String] =
+  private def parameterSchemaType(parameter: Tracker[Parameter]): Target[Tracker[String]] =
     for {
-      schema <- Target.fromOption(Option(parameter.getSchema), s"Parameter '${parameter.getName}' has no schema")
-      tpe    <- Target.fromOption(Option(schema.getType), s"Parameter '${parameter.getName}' has no schema type")
+      schema <- parameter.downField("schema", _.getSchema).raiseErrorIfEmpty("Parameter has no schema")
+      tpe    <- schema.downField("type", _.getType).raiseErrorIfEmpty("Parameter has no schema type")
     } yield tpe
 
   def apply[L <: LA]() = new (SwaggerTerm[L, ?] ~> Target) {
@@ -79,7 +79,7 @@ object SwaggerGenerator {
                                 })
                             case (rbref, _) =>
                               Target.raiseError(s"Invalid request body $$ref name '$rbref' when attempting to process ${tracker.showHistory}")
-                        }
+                          }
                       )
                       .getOrElse(Target.pure(operation))
 
@@ -139,7 +139,9 @@ object SwaggerGenerator {
         Target.fromOption(Option(parameter.getName()), s"Parameter missing 'name': ${parameter}")
 
       case GetBodyParameterSchema(parameter) =>
-        Target.fromOption(Option(parameter.getSchema()), s"Schema not specified for parameter '${parameter.getName}'")
+        parameter
+          .downField("schema", _.getSchema())
+          .raiseErrorIfEmpty("Schema not specified")
 
       case GetHeaderParameterType(parameter) =>
         parameterSchemaType(parameter)
@@ -164,10 +166,9 @@ object SwaggerGenerator {
           .downField("$ref", _.get$ref())
           .map(_.flatMap(_.split("/").lastOption))
           .raiseErrorIfEmpty(s"$$ref not defined for parameter '${parameter.downField("name", _.getName()).get.getOrElse("<name missing as well>")}'")
-          .map(_.get)
 
       case FallbackParameterHandler(parameter) =>
-        Target.raiseError(s"Unsure how to handle ${parameter}")
+        Target.raiseError(s"Unsure how to handle ${parameter.unwrapTracker} (${parameter.history})")
 
       case GetOperationId(operation) =>
         operation
@@ -180,26 +181,27 @@ object SwaggerGenerator {
         operation.downField("responses", _.getResponses).toNel.raiseErrorIfEmpty(s"No responses defined for ${operationId}").map(_.indexedCosequence.value)
 
       case GetSimpleRef(ref) =>
-        Target.fromOption(Option(ref.get$ref).flatMap(_.split("/").lastOption), s"Unspecified $ref")
+        ref
+          .flatDownField("$ref", _.get$ref)
+          .map(_.flatMap(_.split("/").lastOption))
+          .raiseErrorIfEmpty(s"Unspecified $$ref")
+          .map(_.unwrapTracker)
 
       case GetItems(arr) =>
-        Target.fromOption(Option(arr.getItems()), "items.type unspecified")
+        arr
+          .downField("items", _.getItems())
+          .raiseErrorIfEmpty("Unspecified items")
 
       case GetType(model) =>
-        val determinedType = Option(model.getType()).fold("No type definition")(s => s"type: $s")
-        val className      = model.getClass.getName
-        Target.fromOption(
-          Option(model.getType()),
-          s"""|Unknown type for the following structure (${determinedType}, class: ${className}):
-              |  ${model.showNotNullIndented(1)}
-              |""".stripMargin
-        )
+        model
+          .downField("type", _.getType())
+          .raiseErrorIfEmpty("Unknown type")
 
       case FallbackPropertyTypeHandler(prop) =>
-        val determinedType = Option(prop.getType()).fold("No type definition")(s => s"type: $s")
-        val className      = prop.getClass.getName
+        val determinedType = prop.downField("type", _.getType()).fold("No type definition")(s => s"type: ${s.unwrapTracker}")
+        val className      = prop.unwrapTracker.getClass.getName
         Target.raiseError(
-          s"""|Unknown type for the following structure (${determinedType}, class: ${className}):
+          s"""|Unknown type for the following structure (${determinedType}, class: ${className}, ${prop.showHistory}):
               |  ${prop.toString().linesIterator.filterNot(_.contains(": null")).mkString("\n  ")}
               |""".stripMargin
         )

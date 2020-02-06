@@ -2,15 +2,16 @@ package com.twilio.guardrail
 package generators
 
 import _root_.io.swagger.v3.oas.models.media._
-import cats.data.NonEmptyList
 import cats.implicits._
 import cats.~>
+import com.twilio.guardrail.circe.CirceVersion
 import com.twilio.guardrail.core.Tracker
 import com.twilio.guardrail.core.implicits._
 import com.twilio.guardrail.extract.{ DataRedaction, EmptyValueIsNull }
 import com.twilio.guardrail.generators.syntax.RichString
 import com.twilio.guardrail.languages.ScalaLanguage
 import com.twilio.guardrail.protocol.terms.protocol._
+
 import scala.collection.JavaConverters._
 import scala.meta._
 
@@ -55,9 +56,8 @@ object CirceProtocolGenerator {
       case DecodeEnum(clsName) =>
         Target.pure(Some(q"""
           implicit val ${suffixClsName("decode", clsName)}: Decoder[${Type.Name(clsName)}] =
-            Decoder[String].emap(value => parse(value).toRight(${Term.Interpolate(Term.Name("s"),
-                                                                                  List(Lit.String(""), Lit.String(s" not a member of ${clsName}")),
-                                                                                  List(Term.Name("value")))}))
+            Decoder[String].emap(value => parse(value).toRight(${Term
+          .Interpolate(Term.Name("s"), List(Lit.String(""), Lit.String(s" not a member of ${clsName}")), List(Term.Name("value")))}))
         """))
 
       case RenderClass(clsName, tpe, _) =>
@@ -83,10 +83,13 @@ object CirceProtocolGenerator {
             className = clsName,
             extraImports = List.empty[Import],
             definitions = members.to[List] ++
-              terms ++
-              List(Some(values), encoder, decoder).flatten ++
-              implicits ++
-              List(q"def parse(value: String): Option[${Type.Name(clsName)}] = values.find(_.value == value)")
+                  terms ++
+                  List(Some(values), encoder, decoder).flatten ++
+                  implicits ++
+                  List(
+                    q"def parse(value: String): Option[${Type.Name(clsName)}] = values.find(_.value == value)",
+                    q"implicit val order: cats.Order[${Type.Name(clsName)}] = cats.Order.by[${Type.Name(clsName)}, Int](values.indexOf)"
+                  )
           )
         )
       case BuildAccessor(clsName, termName) =>
@@ -94,7 +97,7 @@ object CirceProtocolGenerator {
     }
   }
 
-  object ModelProtocolTermInterp extends (ModelProtocolTerm[ScalaLanguage, ?] ~> Target) {
+  class ModelProtocolTermInterp(circeVersion: CirceVersion) extends (ModelProtocolTerm[ScalaLanguage, ?] ~> Target) {
     def apply[T](term: ModelProtocolTerm[ScalaLanguage, T]): Target[T] = term match {
       case ExtractProperties(swagger) =>
         swagger
@@ -140,14 +143,14 @@ object CirceProtocolGenerator {
                 Type.Name(tpeName)
               }
               (tpe, Option.empty)
-            case SwaggerUtil.DeferredArray(tpeName) =>
+            case SwaggerUtil.DeferredArray(tpeName, containerTpe) =>
               val concreteType = lookupTypeName(tpeName, concreteTypes)(identity)
               val innerType    = concreteType.getOrElse(Type.Name(tpeName))
-              (t"IndexedSeq[$innerType]", Option.empty)
-            case SwaggerUtil.DeferredMap(tpeName) =>
+              (t"${containerTpe.getOrElse(t"Vector")}[$innerType]", Option.empty)
+            case SwaggerUtil.DeferredMap(tpeName, customTpe) =>
               val concreteType = lookupTypeName(tpeName, concreteTypes)(identity)
               val innerType    = concreteType.getOrElse(Type.Name(tpeName))
-              (t"Map[String, $innerType]", Option.empty)
+              (t"${customTpe.getOrElse(t"Map")}[String, $innerType]", Option.empty)
           }
 
           (finalDeclType, finalDefaultValue) = Option(isRequired)
@@ -162,7 +165,11 @@ object CirceProtocolGenerator {
       case RenderDTOClass(clsName, selfParams, parents) =>
         val discriminators     = parents.flatMap(_.discriminators)
         val discriminatorNames = discriminators.map(_.propertyName).toSet
-        val parentOpt          = if (parents.exists(s => s.discriminators.nonEmpty)) { parents.headOption } else { None }
+        val parentOpt = if (parents.exists(s => s.discriminators.nonEmpty)) {
+          parents.headOption
+        } else {
+          None
+        }
         val params = (parents.reverse.flatMap(_.params) ++ selfParams).filterNot(
           param => discriminatorNames.contains(param.term.name.value)
         )
@@ -170,13 +177,11 @@ object CirceProtocolGenerator {
 
         val toStringMethod = if (params.exists(_.dataRedaction != DataVisible)) {
           def mkToStringTerm(param: ProtocolParameter[ScalaLanguage]): Term = param match {
-            case param if param.dataRedaction == DataVisible => Term.Name(param.term.name.value)
+            case param if param.dataRedaction == DataVisible => q"${Term.Name(param.term.name.value)}.toString()"
             case _                                           => Lit.String("[redacted]")
           }
 
-          val toStringTerms = NonEmptyList
-            .fromList(params)
-            .fold(List.empty[Term])(list => mkToStringTerm(list.head) +: list.tail.map(param => q"${Lit.String(",")} + ${mkToStringTerm(param)}"))
+          val toStringTerms = params.map(p => List(mkToStringTerm(p))).intercalate(List(Lit.String(",")))
 
           List[Defn.Def](
             q"override def toString: String = ${toStringTerms.foldLeft[Term](Lit.String(s"${clsName}("))(
@@ -191,7 +196,7 @@ object CirceProtocolGenerator {
           .fold(q"""case class ${Type.Name(clsName)}(..${terms}) { ..$toStringMethod }""")(
             parent =>
               q"""case class ${Type.Name(clsName)}(..${terms}) extends ${template"..${init"${Type.Name(parent.clsName)}(...$Nil)" :: parent.interfaces
-                .map(a => init"${Type.Name(a)}(...$Nil)")} { ..$toStringMethod }"}"""
+                    .map(a => init"${Type.Name(a)}(...$Nil)")} { ..$toStringMethod }"}"""
           )
 
         Target.pure(code)
@@ -205,16 +210,22 @@ object CirceProtocolGenerator {
         val readOnlyKeys: List[String] = params.flatMap(_.readOnlyKey).toList
         val paramCount                 = params.length
         val typeName                   = Type.Name(clsName)
-        val encVal = if (paramCount == 1) {
+        val encVal = if (paramCount == 0) {
+          Option.empty[Term]
+        } else
+          /* Temporarily removing forProductN due to https://github.com/circe/circe/issues/561
+        if (paramCount == 1) {
           val (names, fields): (List[Lit], List[Term.Name]) = params
             .map(param => (Lit.String(param.name), Term.Name(param.term.name.value)))
             .to[List]
             .unzip
           val List(name)  = names
           val List(field) = fields
-          q"""
-            Encoder.forProduct1(${name})((o: ${Type.Name(clsName)}) => o.${field})
-          """
+          Option(
+            q"""
+              Encoder.forProduct1(${name})((o: ${Type.Name(clsName)}) => o.${field})
+            """
+          )
         } else if (paramCount >= 2 && paramCount <= 22) {
           val (names, fields): (List[Lit], List[Term.Name]) = params
             .map(param => (Lit.String(param.name), Term.Name(param.term.name.value)))
@@ -230,26 +241,27 @@ object CirceProtocolGenerator {
             List(param"o: ${Type.Name(clsName)}"),
             Term.Tuple(tupleFields)
           )
-          q"""
-            Encoder.${Term.Name(s"forProduct${paramCount}")}(..${names})(${unapply})
-          """
-        } else {
-          val pairs: List[Term.Tuple] = params
-            .map(param => q"""(${Lit.String(param.name)}, a.${Term.Name(param.term.name.value)}.asJson)""")
-            .to[List]
-          q"""
-            new ObjectEncoder[${Type.Name(clsName)}] {
-              final def encodeObject(a: ${Type
-            .Name(clsName)}): JsonObject = JsonObject.fromIterable(Vector(..${pairs}))
-            }
-          """
-        }
-        Target.pure(Some(q"""
-          implicit val ${suffixClsName("encode", clsName)}: ObjectEncoder[${Type.Name(clsName)}] = {
-            val readOnlyKeys = Set[String](..${readOnlyKeys.map(Lit.String(_))})
-            $encVal.mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
+          Option(
+            q"""
+              Encoder.${Term.Name(s"forProduct${paramCount}")}(..${names})(${unapply})
+            """
+          )
+        } else */ {
+            val pairs: List[Term.Tuple] = params
+              .map(param => q"""(${Lit.String(param.name)}, a.${Term.Name(param.term.name.value)}.asJson)""")
+              .to[List]
+            Option(
+              q"""
+                ${circeVersion.encoderObjectCompanion}.instance[${Type.Name(clsName)}](a => JsonObject.fromIterable(Vector(..${pairs})))
+              """
+            )
           }
-        """))
+        Target.pure(encVal.map(encVal => q"""
+            implicit val ${suffixClsName("encode", clsName)}: ${circeVersion.encoderObject}[${Type.Name(clsName)}] = {
+              val readOnlyKeys = Set[String](..${readOnlyKeys.map(Lit.String(_))})
+              $encVal.mapJsonObject(_.filterKeys(key => !(readOnlyKeys contains key)))
+            }
+          """))
 
       case DecodeModel(clsName, needCamelSnakeConversion, selfParams, parents) =>
         val discriminators     = parents.flatMap(_.discriminators)
@@ -259,50 +271,65 @@ object CirceProtocolGenerator {
         )
         val needsEmptyToNull: Boolean = params.exists(_.emptyToNull == EmptyIsNull)
         val paramCount                = params.length
-        val decVal = if (paramCount <= 22 && !needsEmptyToNull) {
-          val names: List[Lit] = params.map(_.name).map(Lit.String(_)).to[List]
-          q"""
-            Decoder.${Term.Name(s"forProduct${paramCount}")}(..${names})(${Term
-            .Name(clsName)}.apply _)
-          """
-        } else {
-          val (terms, enumerators): (List[Term.Name], List[Enumerator.Generator]) = params
-            .map({ param =>
-              val tpe: Type = param.term.decltpe
-                .flatMap({
-                  case tpe: Type => Some(tpe)
-                  case x =>
-                    println(s"Unsure how to map ${x.structure}, please report this bug!")
-                    None
+        for {
+          decVal <- if (paramCount == 0) {
+            Target.pure(Option.empty[Term])
+          } else
+            /* Temporarily removing forProductN due to https://github.com/circe/circe/issues/561
+          if (paramCount <= 22 && !needsEmptyToNull) {
+            val names: List[Lit] = params.map(_.name).map(Lit.String(_)).to[List]
+            Target.pure(
+              Option(
+                q"""
+                  Decoder.${Term.Name(s"forProduct${paramCount}")}(..${names})(${Term
+                  .Name(clsName)}.apply _)
+                """
+              )
+            )
+          } else */ {
+              params.zipWithIndex
+                .traverse({
+                  case (param, idx) =>
+                    for {
+                      rawTpe <- Target.fromOption(param.term.decltpe, "Missing type")
+                      tpe <- rawTpe match {
+                        case tpe: Type => Target.pure(tpe)
+                        case x         => Target.raiseError(s"Unsure how to map ${x.structure}, please report this bug!")
+                      }
+                    } yield {
+                      val term = Term.Name(s"v$idx")
+                      val enum = if (param.emptyToNull == EmptyIsNull) {
+                        enumerator"""
+                  ${Pat.Var(term)} <- c.downField(${Lit
+                          .String(param.name)}).withFocus(j => j.asString.fold(j)(s => if(s.isEmpty) Json.Null else j)).as[${tpe}]
+                """
+                      } else {
+                        enumerator"""
+                  ${Pat.Var(term)} <- c.downField(${Lit.String(param.name)}).as[${tpe}]
+                """
+                      }
+                      (term, enum)
+                    }
                 })
-                .get
-              val term = Term.Name(param.term.name.value)
-              val enum = if (param.emptyToNull == EmptyIsNull) {
-                enumerator"""
-                ${Pat.Var(term)} <- c.downField(${Lit
-                  .String(param.name)}).withFocus(j => j.asString.fold(j)(s => if(s.isEmpty) Json.Null else j)).as[${tpe}]
-              """
-              } else {
-                enumerator"""
-                ${Pat.Var(term)} <- c.downField(${Lit.String(param.name)}).as[${tpe}]
-              """
-              }
-              (term, enum)
-            })
-            .to[List]
-            .unzip
-          q"""
-          new Decoder[${Type.Name(clsName)}] {
-            final def apply(c: HCursor): Decoder.Result[${Type.Name(clsName)}] =
-              for {
-                ..${enumerators}
-              } yield ${Term.Name(clsName)}(..${terms})
-          }
-          """
+                .map({ pairs =>
+                  val (terms, enumerators) = pairs.unzip
+                  Option(
+                    q"""
+                    new Decoder[${Type.Name(clsName)}] {
+                      final def apply(c: HCursor): Decoder.Result[${Type.Name(clsName)}] =
+                        for {
+                          ..${enumerators}
+                        } yield ${Term.Name(clsName)}(..${terms})
+                    }
+                  """
+                  )
+                })
+            }
+        } yield {
+          decVal.map(decVal => q"""
+              implicit val ${suffixClsName("decode", clsName)}: Decoder[${Type.Name(clsName)}] = $decVal
+            """)
         }
-        Target.pure(Some(q"""
-          implicit val ${suffixClsName("decode", clsName)}: Decoder[${Type.Name(clsName)}] = $decVal
-        """))
 
       case RenderDTOStaticDefns(clsName, deps, encoder, decoder) =>
         val extraImports: List[Import] = deps.map { term =>
@@ -326,10 +353,16 @@ object CirceProtocolGenerator {
             case SwaggerUtil.Resolved(tpe, dep, default, _, _) => Target.pure(tpe)
             case SwaggerUtil.Deferred(tpeName) =>
               Target.fromOption(lookupTypeName(tpeName, concreteTypes)(identity), s"Unresolved reference ${tpeName}")
-            case SwaggerUtil.DeferredArray(tpeName) =>
-              Target.fromOption(lookupTypeName(tpeName, concreteTypes)(tpe => t"IndexedSeq[${tpe}]"), s"Unresolved reference ${tpeName}")
-            case SwaggerUtil.DeferredMap(tpeName) =>
-              Target.fromOption(lookupTypeName(tpeName, concreteTypes)(tpe => t"IndexedSeq[Map[String, ${tpe}]]"), s"Unresolved reference ${tpeName}")
+            case SwaggerUtil.DeferredArray(tpeName, containerTpe) =>
+              Target.fromOption(
+                lookupTypeName(tpeName, concreteTypes)(tpe => t"${containerTpe.getOrElse(t"Vector")}[${tpe}]"),
+                s"Unresolved reference ${tpeName}"
+              )
+            case SwaggerUtil.DeferredMap(tpeName, customTpe) =>
+              Target.fromOption(
+                lookupTypeName(tpeName, concreteTypes)(tpe => t"Vector[${customTpe.getOrElse(t"Map")}[String, ${tpe}]]"),
+                s"Unresolved reference ${tpeName}"
+              )
           }
         } yield result
     }
@@ -343,9 +376,11 @@ object CirceProtocolGenerator {
       case ProtocolImports() =>
         Target.pure(
           List(
+            q"import cats.syntax.either._",
             q"import io.circe._",
             q"import io.circe.syntax._",
-            q"import io.circe.generic.semiauto._"
+            q"import io.circe.generic.semiauto._",
+            q"import cats.implicits._"
           )
         )
 

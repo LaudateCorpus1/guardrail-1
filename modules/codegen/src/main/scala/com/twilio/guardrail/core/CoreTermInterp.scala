@@ -2,6 +2,7 @@ package com.twilio.guardrail
 package core
 
 import cats.data.{ NonEmptyList, State }
+// Issue #496: Injected StructuredLogger too slow import cats.free.{ Free, GuardrailFreeHacks }
 import cats.implicits._
 import cats.{ FlatMap, ~> }
 import com.twilio.guardrail.languages.LA
@@ -9,15 +10,16 @@ import com.twilio.guardrail.terms._
 import java.nio.file.Paths
 import scala.util.control.NonFatal
 
-case class CoreTermInterp[L <: LA](defaultFramework: String,
-                                   handleModules: NonEmptyList[String] => CoreTarget[CodegenApplication[L, ?] ~> Target],
-                                   frameworkMapping: PartialFunction[String, CodegenApplication[L, ?] ~> Target],
-                                   handleImport: String => Either[Error, L#Import])
-    extends (CoreTerm[L, ?] ~> CoreTarget) {
+case class CoreTermInterp[L <: LA](
+    defaultFramework: String,
+    handleModules: NonEmptyList[String] => CoreTarget[CodegenApplication[L, ?] ~> Target],
+    frameworkMapping: PartialFunction[String, CodegenApplication[L, ?] ~> Target],
+    handleImport: String => Either[Error, L#Import]
+) extends (CoreTerm[L, ?] ~> CoreTarget) {
   def apply[T](x: CoreTerm[L, T]): CoreTarget[T] = x match {
     case GetDefaultFramework() =>
       CoreTarget.log.function("getDefaultFramework") {
-        Target.log.debug(s"Providing ${defaultFramework}") >> CoreTarget.pure(Some(defaultFramework))
+        CoreTarget.log.debug(s"Providing ${defaultFramework}") >> CoreTarget.pure(Some(defaultFramework))
       }
 
     case ExtractGenerator(context, vendorDefaultFramework) =>
@@ -58,7 +60,7 @@ case class CoreTermInterp[L <: LA](defaultFramework: String,
       type To   = List[Args]
       val start: From = (List.empty[Args], args.toList)
       import CoreTarget.log.debug
-      Target.log.function("parseArgs") {
+      CoreTarget.log.function("parseArgs") {
         FlatMap[CoreTarget].tailRecM[From, To](start)({
           case pair @ (sofar, rest) =>
             val empty = sofar
@@ -116,7 +118,7 @@ case class CoreTermInterp[L <: LA](defaultFramework: String,
         case x: Parsed.Error      => Left(x)
         case Parsed.Success(tree) => Right(tree)
       }
-      Target.log.function("processArgSet")(for {
+      CoreTarget.log.function("processArgSet")(for {
         _          <- CoreTarget.log.debug("Processing arguments")
         specPath   <- CoreTarget.fromOption(args.specPath, MissingArg(args, Error.ArgName("--specPath")))
         outputPath <- CoreTarget.fromOption(args.outputPath, MissingArg(args, Error.ArgName("--outputPath")))
@@ -139,14 +141,19 @@ case class CoreTermInterp[L <: LA](defaultFramework: String,
           Paths.get(specPath), {
             swagger =>
               try {
-                (for {
+                val Sw = SwaggerTerms.swaggerTerm[L, CodegenApplication[L, ?]]
+                val program = for {
+                  _                  <- Sw.log.debug("Running guardrail codegen")
                   definitionsPkgName <- ScalaTerms.scalaTerm[L, CodegenApplication[L, ?]].fullyQualifyPackageName(pkgName)
-                  defs <- Common
+                  (proto, codegen) <- Common
                     .prepareDefinitions[L, CodegenApplication[L, ?]](kind, context, Tracker(swagger), definitionsPkgName ++ ("definitions" :: dtoPackage))
-                  (proto, codegen) = defs
                   result <- Common
                     .writePackage[L, CodegenApplication[L, ?]](proto, codegen, context)(Paths.get(outputPath), pkgName, dtoPackage, customImports)
-                } yield result).foldMap(targetInterpreter)
+                } yield result
+                // Issue #496: Injected StructuredLogger too slow
+                // GuardrailFreeHacks.injectLogs(program, Set("LogPush", "LogPop", "LogDebug", "LogInfo", "LogWarning", "LogError"), Sw.log.push, Sw.log.pop, Free.pure(()))
+                program
+                  .foldMap(targetInterpreter)
               } catch {
                 case NonFatal(ex) =>
                   val stackTrace =

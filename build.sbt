@@ -15,9 +15,10 @@ val catsVersion          = "1.6.0"
 val catsEffectVersion    = "1.0.0"
 val circeVersion         = "0.12.1"
 val http4sVersion        = "0.20.0"
-val scalacheckVersion    = "1.14.2"
-val scalatestVersion     = "3.0.8"
-val javaparserVersion    = "3.7.1"
+val scalacheckVersion    = "1.14.3"
+val scalatestVersion     = "3.1.0"
+val scalatestPlusVersion = "3.1.0.0-RC2"
+val javaparserVersion    = "3.15.11"
 val endpointsVersion     = "0.8.0"
 val ahcVersion           = "2.8.1"
 val dropwizardVersion    = "1.3.9"
@@ -44,6 +45,7 @@ val exampleCases: List[ExampleCase] = List(
   ExampleCase(sampleResource("alias.yaml"), "alias"),
   ExampleCase(sampleResource("contentType-textPlain.yaml"), "tests.contentTypes.textPlain"),
   ExampleCase(sampleResource("custom-header-type.yaml"), "tests.customTypes.customHeader"),
+  ExampleCase(sampleResource("date-time.yaml"), "dateTime"),
   ExampleCase(sampleResource("edgecases/defaults.yaml"), "edgecases.defaults"),
   ExampleCase(sampleResource("formData.yaml"), "form"),
   ExampleCase(sampleResource("issues/issue45.yaml"), "issues.issue45"),
@@ -64,9 +66,13 @@ val exampleCases: List[ExampleCase] = List(
   ExampleCase(sampleResource("issues/issue351.yaml"), "issues.issue351"),
   ExampleCase(sampleResource("issues/issue357.yaml"), "issues.issue357"),
   ExampleCase(sampleResource("issues/issue364.yaml"), "issues.issue364").args("--dtoPackage", "some.thing"),
+  ExampleCase(sampleResource("issues/issue389.yaml"), "issues.issue389"),
   ExampleCase(sampleResource("issues/issue405.yaml"), "issues.issue405"),
+  ExampleCase(sampleResource("issues/issue440.yaml"), "issues.issue440"),
+  ExampleCase(sampleResource("issues/issue455.yaml"), "issues.issue455"),
   ExampleCase(sampleResource("multipart-form-data.yaml"), "multipartFormData"),
   ExampleCase(sampleResource("petstore.json"), "examples").args("--import", "support.PositiveLong"),
+  ExampleCase(sampleResource("petstore-openapi-3.0.2.yaml"), "examples.petstore.openapi302").args("--import", "support.PositiveLong"),
   ExampleCase(sampleResource("plain.json"), "tests.dtos"),
   ExampleCase(sampleResource("polymorphism.yaml"), "polymorphism"),
   ExampleCase(sampleResource("polymorphism-mapped.yaml"), "polymorphismMapped"),
@@ -149,15 +155,19 @@ addCommandAlias("scalaTestSuite", "; codegen/test ; runtimeScalaSuite")
 addCommandAlias("javaTestSuite", "; codegen/test ; runtimeJavaSuite")
 addCommandAlias("format", "; codegen/scalafmt ; codegen/test:scalafmt ; " + scalaFrameworks.map(x => s"${x}Sample/scalafmt ; ${x}Sample/test:scalafmt").mkString("; "))
 addCommandAlias("checkFormatting", "; codegen/scalafmtCheck ; codegen/test:scalafmtCheck ; " + scalaFrameworks.map(x => s"${x}Sample/scalafmtCheck ; ${x}Sample/test:scalafmtCheck").mkString("; "))
-addCommandAlias("testSuite", "; scalaTestSuite ; javaTestSuite")
+addCommandAlias("testSuite", "; scalaTestSuite ; javaTestSuite; microsite/compile")
 
 addCommandAlias(
   "publishBintray",
-  "; set publishTo in codegen := (publishTo in bintray in codegen).value; codegen/publishSigned"
+  "; set publishTo in codegen := (publishTo in bintray in codegen).value; codegen/publish"
 )
 addCommandAlias(
   "publishSonatype",
-  "; set publishTo in codegen := (sonatypePublishTo in codegen).value; codegen/publishSigned"
+  "; set publishTo in codegen := (sonatypePublishToBundle in codegen).value; codegen/publish"
+)
+addCommandAlias(
+  "publishLocal",
+  "; package ; codegen/publishLocal"
 )
 
 resolvers += Resolver.sonatypeRepo("releases")
@@ -167,7 +177,8 @@ publishMavenStyle := true
 
 val testDependencies = Seq(
   "org.scalatest" %% "scalatest" % scalatestVersion % Test,
-  "org.scalacheck" %% "scalacheck" % scalacheckVersion % Test
+  "org.scalacheck" %% "scalacheck" % scalacheckVersion % Test,
+  "org.scalatestplus" %% "scalatestplus-scalacheck" % scalatestPlusVersion % Test
 )
 
 val excludedWarts = Set(Wart.DefaultArguments, Wart.Product, Wart.Serializable, Wart.Any)
@@ -205,11 +216,11 @@ lazy val codegen = (project in file("modules/codegen"))
     (name := "guardrail") +:
       codegenSettings,
     libraryDependencies ++= testDependencies ++ Seq(
-      "org.scalameta"               %% "scalameta"                    % "4.2.4",
+      "org.scalameta"               %% "scalameta"                    % "4.3.0",
       "com.github.javaparser"       % "javaparser-symbol-solver-core" % javaparserVersion,
-      "org.eclipse.jdt"             % "org.eclipse.jdt.core"          % "3.17.0",
+      "org.eclipse.jdt"             % "org.eclipse.jdt.core"          % "3.19.0",
       "org.eclipse.platform"        % "org.eclipse.equinox.app"       % "1.3.600",
-      "io.swagger.parser.v3"        % "swagger-parser"                % "2.0.12",
+      "io.swagger.parser.v3"        % "swagger-parser"                % "2.0.17",
       "org.tpolecat"                %% "atto-core"                    % "0.6.3",
       "org.typelevel"               %% "cats-core"                    % catsVersion,
       "org.typelevel"               %% "cats-kernel"                  % catsVersion,
@@ -327,7 +338,7 @@ lazy val dropwizardSample = (project in file("modules/sample-dropwizard"))
       "org.scalatest"              %% "scalatest"              % scalatestVersion   % Test,
       "junit"                      %  "junit"                  % "4.12"             % Test,
       "com.novocode"               %  "junit-interface"        % "0.11"             % Test,
-      "org.mockito"                %% "mockito-scala"          % "1.2.0"            % Test,
+      "org.mockito"                %% "mockito-scala"          % "1.7.1"            % Test,
       "com.github.tomakehurst"     %  "wiremock"               % "1.57"             % Test,
       "io.dropwizard"              %  "dropwizard-testing"     % dropwizardVersion  % Test,
       "org.glassfish.jersey.test-framework.providers" % "jersey-test-framework-provider-grizzly2" % jerseyVersion % Test

@@ -35,6 +35,7 @@ trait LowPriorityTrackerEvidence {
 }
 
 trait HighPriorityTrackerEvidence extends LowPriorityTrackerEvidence {
+  implicit def jlBooleanConvincer: Tracker.Convincer[Option[java.lang.Boolean], Option[Boolean]] = Tracker.Convincer(_.map(x => x))
   implicit def optionalArrayConvincer[A]: Tracker.Convincer[Option[Array[A]], List[A]]           = Tracker.Convincer(_.fold(List.empty[A])(_.toList))
   implicit def optionaljuListConvincer[A]: Tracker.Convincer[Option[java.util.List[A]], List[A]] = Tracker.Convincer(_.fold(List.empty[A])(_.asScala.toList))
   implicit def optionalListConvincer[A]: Tracker.Convincer[Option[List[A]], List[A]]             = Tracker.Convincer(_.getOrElse(List.empty[A]))
@@ -82,6 +83,8 @@ trait HighPriorityTrackerSyntax extends LowPriorityTrackerSyntax {
   }
 
   implicit class OptionSyntax[A](tracker: Tracker[Option[A]]) {
+    def fold[B](default: => B)(f: Tracker[A] => B): B =
+      tracker.unwrapTracker.fold(default)(x => f(Tracker.cloneHistory(tracker, x)))
     def orHistory: Either[Vector[String], Tracker[A]]      = tracker.indexedCosequence.toRight(tracker.history)
     def raiseErrorIfEmpty(err: String): Target[Tracker[A]] = Target.fromOption(tracker.indexedCosequence, s"${err} (${tracker.showHistory})")
     class FlatDownFieldPartiallyApplied[C](val dummy: Boolean = true) {
@@ -94,7 +97,7 @@ trait HighPriorityTrackerSyntax extends LowPriorityTrackerSyntax {
   implicit class RefineSyntax[A](tracker: Tracker[A]) {
     class RefinePartiallyApplied[C](val dummy: Boolean = true) {
       def apply[B1](r: PartialFunction[A, B1])(f: Tracker[B1] => C): Either[Tracker[A], C] =
-        r.andThen(value => f(tracker.map(_ => value)))
+        r.andThen(value => f(Tracker.cloneHistory(tracker, value)))
           .andThen(Right(_))
           .applyOrElse(tracker.get, (_: A) => Left(tracker))
     }
@@ -104,10 +107,13 @@ trait HighPriorityTrackerSyntax extends LowPriorityTrackerSyntax {
   implicit class RefineEitherSyntax[A, C](value: Either[Tracker[A], C]) {
     def orRefine[B1](r: PartialFunction[A, B1])(f: Tracker[B1] => C): Either[Tracker[A], C] =
       value.fold({ tracker =>
-        r.andThen(value => f(tracker.map(_ => value)))
+        r.andThen(value => f(Tracker.cloneHistory(tracker, value)))
           .andThen(Right(_))
           .applyOrElse(tracker.get, (_: A) => Left(tracker))
       }, Right(_))
+
+    def orRefineFallback(f: Tracker[A] => C): C =
+      value.fold(f, identity _)
   }
 
   implicit class Syntax[A](tracker: Tracker[A]) {
@@ -140,6 +146,5 @@ object Tracker extends HighPriorityTrackerEvidence with HighPriorityTrackerSynta
   }
 
   def apply(swagger: OpenAPI): Tracker[OpenAPI]                     = new Tracker(swagger, Vector.empty)
-  def hackyAdapt[A](value: A, history: Vector[String]): Tracker[A]  = new Tracker(value, history)
   def cloneHistory[A, B](tracker: Tracker[A], value: B): Tracker[B] = new Tracker(value, tracker.history)
 }
